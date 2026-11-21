@@ -1,0 +1,56 @@
+AMEM COMMUNITY LICENSE 1.0
+Based on the Apache License, Version 2.0, with the Commons Clause 1.0 condition.
+
+Copyright (c) 2026 [COPYRIGHT HOLDER — replace with your full legal name or company name]
+
+IMPORTANT
+This is a source-available license, not an OSI-approved Open Source license.
+It consists of:
+1. the Apache License, Version 2.0 (the "Base License"); and
+2. the additional commercial restriction below (the "Commons Clause Condition").
+
+BASE LICENSE
+The Work is licensed under the Apache License, Version 2.0, whose terms are incorporated into this license by reference:
+https://www.apache.org/licenses/LICENSE-2.0
+
+The Base License applies except to the extent that the additional condition below expressly restricts the rights granted by it. If there is a conflict, the additional condition controls.
+
+ADDITIONAL COMMERCIAL RESTRICTION — COMMONS CLAUSE 1.0
+
+The Software is provided to you by the Licensor under the Base License, subject to this condition.
+
+Without limiting other conditions in the Base License, the grant of rights under the Base License does not include, and this license does not grant, the right to Sell the Software.
+
+For purposes of the foregoing, "Sell" means practicing any or all of the rights granted to you under the Base License to provide to third parties, for a fee or other consideration (including without limitation fees for hosting or consulting/support services related to the Software), a product or service whose value derives, entirely or substantially, from the functionality of the Software.
+
+Software: AMem
+Base License: Apache License, Version 2.0
+Additional condition: Commons Clause 1.0
+Licensor: [COPYRIGHT HOLDER — replace with your full legal name or company name]
+
+COMMUNITY USE CLARIFICATION
+
+For clarity, and subject to all other terms of this license:
+- You may use, run, install, reproduce, study, modify and create derivative works of AMem.
+- You may use AMem internally within your own organisation, including for that organisation's business activities, provided you do not Sell the Software as defined above.
+- You may create and distribute forks and modified versions free of charge, provided you comply with the Base License and this additional condition.
+- You may integrate AMem into your own software and distribute that software free of charge, provided the value of the product or service does not derive, entirely or substantially, from AMem's functionality.
+- You may charge for unrelated products or services, and may charge for support or other obligations only where doing so does not amount to Selling the Software under the definition above.
+
+COMMERCIAL LICENSING
+
+The restriction above does not prevent the Licensor, the copyright holder, or a person expressly authorised in writing by the copyright holder from offering AMem under a separate commercial agreement. A separate commercial agreement may authorise activities that this license does not permit.
+
+TRADEMARKS
+
+This license does not grant permission to use the AMem name, logo, or other trademarks to suggest endorsement, affiliation, or that a fork is the official AMem project. You may make reasonable factual references to AMem to identify the origin of the software.
+
+NO WARRANTY
+
+The Work is provided on an "AS IS" basis, without warranties or conditions of any kind, to the maximum extent permitted by applicable law. The limitations and disclaimers in the Base License apply.
+
+NOTICE
+
+Any license notice or attribution required by the Base License must also include this additional commercial restriction notice. You must provide recipients with this license text, including the additional condition, whenever you redistribute the Software or a derivative work.
+
+END OF AMEM COMMUNITY LICENSE 1.0

@@ -1,0 +1,13 @@
+AMem
+Copyright (c) 2026 oussissa
+
+AMem is distributed under the AMem Community License 1.0, based on the Apache License 2.0 with the Commons Clause 1.0 commercial restriction.
+
+License: see the LICENSE file in this repository.
+The license permits use, modification and free redistribution subject to its terms. Commercial sale, paid SaaS and paid managed-service exploitation of AMem are restricted unless separately authorised in writing by the copyright holder.
+
+PROJECT IDENTITY
+"AMem" and the AMem logo (if any) identify the upstream project. No trademark rights are granted by the software license. Forks and modified distributions must not imply that they are the official AMem project or are endorsed by the upstream maintainers.
+
+THIRD-PARTY COMPONENTS
+This notice applies only to the AMem project materials authored by the copyright holder and its contributors. Third-party dependencies, bundled assets, datasets, fonts and other materials may be governed by their own licenses and notices. See the relevant component's license and attribution files.
