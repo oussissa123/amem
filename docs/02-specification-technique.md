@@ -937,20 +937,17 @@ Les clés d'API ne sont jamais écrites dans le fichier : seule la variable d'en
 ## 16. Déploiement
 
 ### 16.1 Local
-```yaml
-# docker-compose.yml fourni par `amem init --with-compose`
-services:
-  db:
-    image: pgvector/pgvector:pg17
-    environment: {POSTGRES_USER: amem, POSTGRES_PASSWORD: amem, POSTGRES_DB: amem}
-    ports: ["127.0.0.1:5433:5432"]   # 5433 : évite le PostgreSQL déjà présent sur 5432
-    volumes: [amem-db:/var/lib/postgresql/data]
-  ollama:
-    image: ollama/ollama
-    ports: ["127.0.0.1:11434:11434"]
-volumes: {amem-db: {}}
-```
-Le binaire `amem` s'exécute sur l'hôte ; l'agent lance `amem mcp`. Les migrations s'appliquent automatiquement au démarrage (verrou consultatif).
+Le binaire `amem` s'exécute sur l'hôte ; l'agent lance `amem mcp`. Seule la base est en conteneur : `docker compose up -d db` (`make db`). Les migrations s'appliquent automatiquement au démarrage (verrou consultatif).
+
+### 16.1 bis Installation complète avec Docker Compose
+`docker-compose.yml` à la racine du dépôt :
+
+| Service | Image | Exposition | Volume |
+|---|---|---|---|
+| `db` | `postgres:17-alpine` (phase 3 : `pgvector/pgvector:pg17`), healthcheck `pg_isready` | `127.0.0.1:5433` | `amem-db` |
+| `amem` | construite par le `Dockerfile` (build Go statique, exécution Alpine, utilisateur non-root 10001), commande `amem serve`, healthcheck `/readyz` | `${AMEM_HTTP_BIND:-127.0.0.1}:7420` | `amem-data` → `/data` (`AMEM_ROOT=/data/projects`) |
+
+Variables : `AMEM_DB_PASSWORD` (défaut `amem`), `AMEM_HTTP_BIND`. L'administration se fait dans le conteneur, où la CLI a le rôle admin local : `docker compose exec amem amem init …`, `amem token create`, `amem grant`. Les agents se branchent en mode HTTP (`adapter install multica --mode http`), avec un jeton par agent.
 
 ### 16.2 Serveur
 - Image OCI `amem` ; volume persistant pour la racine des projets ; PostgreSQL managé ou dédié avec les extensions requises.
@@ -958,7 +955,9 @@ Le binaire `amem` s'exécute sur l'hôte ; l'agent lance `amem mcp`. Les migrati
 - Sauvegarde : `amem backup` = archive tar.zst contenant les répertoires de projets + export JSON des tables O (`projects`, `principals`, `api_tokens`, `grants`, `restricted_grants`, `audit_log`, `ingestions`, `feedback`) + manifeste (version de schéma, hash). Restauration : import O, copie des fichiers, `index rebuild`. Testée en CI (UC-14).
 
 ### 16.3 Distribution
-Binaires `linux/darwin × amd64/arm64` (GoReleaser), image OCI multi-arch, formule Homebrew. Versionnement sémantique ; migrations uniquement en avant, compatibles N-1 pour permettre le retour arrière du binaire d'une version mineure.
+Intégration continue : `.github/workflows/tests.yml` (push sur `main` et pull requests) — `go mod tidy -diff`, `go vet`, `go test -race` avec un service PostgreSQL 17 (`AMEM_TEST_DATABASE_URL`, tests d'intégration inclus), puis construction de l'image Docker et test de fumée.
+
+Cible : binaires `linux/darwin × amd64/arm64` (GoReleaser), image OCI multi-arch, formule Homebrew. Versionnement sémantique ; migrations uniquement en avant, compatibles N-1 pour permettre le retour arrière du binaire d'une version mineure.
 
 ## 17. Observabilité
 
@@ -1052,7 +1051,8 @@ Livré (phases 1 et 2), dans `cmd/amem` et `internal/` :
 | Jetons (SHA-256), rôles par projet, identité locale agent/humain | Fait |
 | Intégrations : `adapter install multica` (stdio, http), `claude-code`, `codex` ; `adapter check` | Fait |
 | Ingestion avec masquage des secrets | Stockée, état `needs_llm` (extraction en phase 4) |
-| Tests | Unitaires + intégration sur base jetable, `-race` (isolation, résolution, 12 écrivains concurrents, RG-04, remplacement, secrets, reconstruction) |
+| Tests | Unitaires + intégration sur base jetable, `-race` (isolation, résolution, 12 écrivains concurrents, RG-04, remplacement, secrets, reconstruction) ; exécutés par GitHub Actions |
+| Installation | Fait : `Dockerfile` + `docker-compose.yml` (base + serveur HTTP) |
 
 Écarts assumés par rapport à la cible :
 - **Indexation synchrone** : la projection lexicale et la carte sont mises à jour dans la requête d'écriture (pas encore de file `jobs`). La file arrivera avec les embeddings (phase 3).

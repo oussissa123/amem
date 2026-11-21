@@ -2,7 +2,7 @@
 GO := ./scripts/go.sh
 TEST_DB ?= postgres://amem:amem@127.0.0.1:5433/postgres?sslmode=disable
 
-.PHONY: build test test-unit vet db
+.PHONY: build test test-unit vet db up
 
 build:
 	$(GO) build -o bin/amem ./cmd/amem
@@ -17,5 +17,7 @@ vet:
 	$(GO) vet ./...
 
 db:
-	docker volume create amem-db >/dev/null
 	docker compose up -d db
+
+up:
+	docker compose up -d --build

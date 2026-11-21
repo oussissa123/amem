@@ -1,0 +1,50 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: amem
+          POSTGRES_PASSWORD: amem
+          POSTGRES_DB: amem
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U amem"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      # Base d'administration : chaque test d'intégration y crée sa base jetable.
+      AMEM_TEST_DATABASE_URL: postgres://amem:amem@localhost:5432/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Vérifier go.mod / go.sum
+        run: go mod tidy -diff
+      - name: Vet
+        run: go vet ./...
+      - name: Tests (unitaires + intégration, -race)
+        run: go test -race -count=1 ./...
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Construire l'image
+        run: docker build -t amem:ci .
+      - name: Smoke test
+        run: docker run --rm amem:ci --help

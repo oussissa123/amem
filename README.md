@@ -4,7 +4,20 @@ Mémoire durable **par projet** pour agents IA : incidents, décisions, conventi
 
 Spécifications : [générale](docs/00-specification-generale.md) · [fonctionnelle](docs/01-specification-fonctionnelle.md) · [technique](docs/02-specification-technique.md).
 
-## Démarrage
+## Installation avec Docker (serveur partagé)
+
+Base PostgreSQL et serveur amem (REST `/v1`, MCP `/mcp`) sur `http://127.0.0.1:7420` :
+
+```bash
+docker compose up -d --build
+docker compose exec amem amem init mra --name MRA --repo https://github.com/acme/mra-api
+docker compose exec amem amem token create agent:multica/dev-senior   # jeton affiché une seule fois
+docker compose exec amem amem grant agent:multica/dev-senior mra contributor
+```
+
+Les agents s'y branchent en mode HTTP (`adapter install … --mode http`). `AMEM_DB_PASSWORD` change le mot de passe de la base, `AMEM_HTTP_BIND=0.0.0.0` expose le serveur au réseau.
+
+## Démarrage en local (binaire sur l'hôte)
 
 ```bash
 make db        # PostgreSQL local sur 127.0.0.1:5433
@@ -79,3 +92,5 @@ Identité locale : un humain au terminal est `human:<utilisateur>` (admin local)
 ```bash
 make test   # unitaires + intégration (base jetable créée sur le PostgreSQL local), avec -race
 ```
+
+La même suite tourne dans GitHub Actions ([`.github/workflows/tests.yml`](.github/workflows/tests.yml)) à chaque push sur `main` et sur chaque pull request, avec la construction de l'image Docker.

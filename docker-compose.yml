@@ -1,5 +1,10 @@
-# Base PostgreSQL d'amem en local. Port 5433 sur l'hôte pour ne pas gêner un
-# PostgreSQL déjà présent sur 5432 (valeur par défaut de AMEM_DATABASE_URL).
+# Installation d'amem : PostgreSQL + serveur amem (REST /v1, MCP /mcp).
+#
+#   docker compose up -d          # base + serveur sur http://127.0.0.1:7420
+#   docker compose up -d db       # base seule, pour le binaire local (make db)
+#
+# La base est publiée sur 127.0.0.1:5433 pour ne pas gêner un PostgreSQL déjà
+# présent sur 5432 (valeur par défaut de AMEM_DATABASE_URL côté hôte).
 # Phase 3 (recherche sémantique) : remplacer l'image par pgvector/pgvector:pg17.
 services:
   db:
@@ -7,14 +12,37 @@ services:
     container_name: amem-db
     environment:
       POSTGRES_USER: amem
-      POSTGRES_PASSWORD: amem
+      POSTGRES_PASSWORD: ${AMEM_DB_PASSWORD:-amem}
       POSTGRES_DB: amem
     ports:
       - "127.0.0.1:5433:5432"
     volumes:
       - amem-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U amem -d amem"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  amem:
+    build: .
+    image: amem:local
+    container_name: amem
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      AMEM_DATABASE_URL: postgres://amem:${AMEM_DB_PASSWORD:-amem}@db:5432/amem?sslmode=disable
+    ports:
+      - "${AMEM_HTTP_BIND:-127.0.0.1}:7420:7420"
+    volumes:
+      - amem-data:/data
     restart: unless-stopped
 
 volumes:
+  # Nom fixe : réutilise le volume créé par les versions précédentes (make db).
   amem-db:
-    external: true
+    name: amem-db
+  amem-data:
+    name: amem-data
