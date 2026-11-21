@@ -1,0 +1,20 @@
+# Base PostgreSQL d'amem en local. Port 5433 sur l'hôte pour ne pas gêner un
+# PostgreSQL déjà présent sur 5432 (valeur par défaut de AMEM_DATABASE_URL).
+# Phase 3 (recherche sémantique) : remplacer l'image par pgvector/pgvector:pg17.
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: amem-db
+    environment:
+      POSTGRES_USER: amem
+      POSTGRES_PASSWORD: amem
+      POSTGRES_DB: amem
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - amem-db:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  amem-db:
+    external: true
