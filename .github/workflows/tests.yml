@@ -29,8 +29,8 @@ jobs:
       # Base d'administration : chaque test d'intégration y crée sa base jetable.
       AMEM_TEST_DATABASE_URL: postgres://amem:amem@localhost:5432/postgres?sslmode=disable
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       - name: Vérifier go.mod / go.sum
@@ -43,7 +43,7 @@ jobs:
   docker:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Construire l'image
         run: docker build -t amem:ci .
       - name: Smoke test
