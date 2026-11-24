@@ -1,5 +1,5 @@
-// Package search implements hybrid retrieval (spec 02 §7). Phase 2 ships the
-// exact and lexical channels; the semantic channel plugs into the same fusion.
+// Package search implements hybrid retrieval (spec 02 §7): exact, lexical
+// and semantic channels, merged by reciprocal rank fusion.
 package search
 
 import (
@@ -14,6 +14,7 @@ import (
 
 	"github.com/oussissa/amem/internal/chunk"
 	"github.com/oussissa/amem/internal/domain"
+	"github.com/oussissa/amem/internal/embed"
 	"github.com/oussissa/amem/internal/pgstore"
 )
 
@@ -44,7 +45,13 @@ type Request struct {
 	IncludeWeak     bool
 	AllowRestricted bool
 	Weights         Weights
+	// Encode turns the query into a vector of a registered model; nil
+	// means no semantic channel (degraded ["semantic"]).
+	Encode Encoder
 }
+
+// Encoder encodes a query; modelID and dims select the stored vectors.
+type Encoder func(ctx context.Context, text string) (vec []float32, modelID, dims int, err error)
 
 // Weights are the tunable ranking parameters (project.yaml → search).
 type Weights struct {
@@ -53,9 +60,13 @@ type Weights struct {
 	FreshnessHalfLife  float64 // days
 	MinCoverage        float64
 	MaxRequiredMatches int
+	// SemanticMinSimilarity is the cosine similarity above which a
+	// semantic match alone makes a result relevant (calibrated by amem eval).
+	SemanticMinSimilarity float64
 }
 
-var DefaultWeights = Weights{Lexical: 1, Semantic: 1, FreshnessHalfLife: 365, MinCoverage: 0.5, MaxRequiredMatches: 4}
+var DefaultWeights = Weights{Lexical: 1, Semantic: 1, FreshnessHalfLife: 365, MinCoverage: 0.5, MaxRequiredMatches: 4,
+	SemanticMinSimilarity: 0.45}
 
 type Snippet struct {
 	Section string `json:"section"`
@@ -108,7 +119,13 @@ type candidate struct {
 	lexScore            float64
 	coverageOK          bool
 	exactLevel          int
+	semRank             int
+	semSim              float64
+	semSection, semText string
 }
+
+// semanticTopK is the number of nearest chunks read by the semantic channel.
+const semanticTopK = 100
 
 // Run executes a search. Caller handles authorization and logging.
 func Run(ctx context.Context, q pgstore.Q, req Request) (*Response, error) {
@@ -132,8 +149,25 @@ func Run(ctx context.Context, q pgstore.Q, req Request) (*Response, error) {
 	}
 	keys := domain.KeyInTextRe.FindAllString(text, -1)
 
+	// The query is encoded while the exact and lexical channels run.
+	type encoded struct {
+		vec           []float32
+		modelID, dims int
+		err           error
+	}
+	var enc chan encoded
+	if req.Encode != nil && text != "" {
+		enc = make(chan encoded, 1)
+		go func() {
+			var e encoded
+			e.vec, e.modelID, e.dims, e.err = req.Encode(ctx, text)
+			enc <- e
+		}()
+	}
+
 	where, args := filterSQL(req, 2)
 	cands := map[string]*candidate{}
+	var degraded []string
 
 	// Exact channel: keys, declared keywords and error signatures.
 	if text != "" || len(keys) > 0 {
@@ -232,8 +266,18 @@ func Run(ctx context.Context, q pgstore.Q, req Request) (*Response, error) {
 		}
 	}
 
+	// Semantic channel: nearest chunks to the query vector, best chunk per
+	// knowledge, ranked by cosine similarity. Any failure only degrades.
+	if enc == nil {
+		degraded = append(degraded, "semantic")
+	} else if e := <-enc; e.err != nil || len(e.vec) == 0 || e.dims != len(e.vec) {
+		degraded = append(degraded, "semantic")
+	} else if err := semanticChannel(ctx, q, req, where, args, e.vec, e.modelID, e.dims, cands); err != nil {
+		return nil, fmt.Errorf("semantic channel: %w", err)
+	}
+
 	if len(cands) == 0 {
-		return &Response{Project: req.Project, NoRelevantResult: true, Degraded: []string{"semantic"}, Results: []Result{}, Notice: Notice}, nil
+		return &Response{Project: req.Project, NoRelevantResult: true, Degraded: nz(degraded), Results: []Result{}, Notice: Notice}, nil
 	}
 
 	ids := make([]string, 0, len(cands))
@@ -256,12 +300,21 @@ func Run(ctx context.Context, q pgstore.Q, req Request) (*Response, error) {
 		if c.lexRank > 0 {
 			r.Matched = append(r.Matched, "lexical")
 		}
+		semOK := c.semRank > 0 && c.semSim >= req.Weights.SemanticMinSimilarity
+		if semOK {
+			r.Matched = append(r.Matched, "semantic")
+		}
 		if c.text != "" && c.section != "header" {
 			r.Snippet = &Snippet{Section: c.section, Text: truncate(c.text, 300)}
+		} else if c.semText != "" && c.semSection != "header" && semOK {
+			r.Snippet = &Snippet{Section: c.semSection, Text: truncate(c.semText, 300)}
 		}
 		rrf := 0.0
 		if c.lexRank > 0 {
 			rrf += req.Weights.Lexical / float64(60+c.lexRank)
+		}
+		if c.semRank > 0 {
+			rrf += req.Weights.Semantic / float64(60+c.semRank)
 		}
 		age := now.Sub(r.UpdatedAt).Hours() / 24
 		fresh := 0.85 + 0.15*math.Pow(2, -age/req.Weights.FreshnessHalfLife)
@@ -270,7 +323,7 @@ func Run(ctx context.Context, q pgstore.Q, req Request) (*Response, error) {
 			bonus += 0.15
 		}
 		r.Score = rrf * statusFactor[r.Status] * confidenceFactor[r.Confidence] * bonus * fresh
-		r.relevant = c.exactLevel > 0 || c.coverageOK
+		r.relevant = c.exactLevel > 0 || c.coverageOK || semOK
 		r.Weak = !r.relevant
 		if r.Status == string(domain.Disputed) {
 			r.Warnings = append(r.Warnings, "disputed")
@@ -295,7 +348,7 @@ func Run(ctx context.Context, q pgstore.Q, req Request) (*Response, error) {
 		return out[i].Score > out[j].Score
 	})
 
-	resp := &Response{Project: req.Project, Degraded: []string{"semantic"}, Notice: Notice}
+	resp := &Response{Project: req.Project, Degraded: nz(degraded), Notice: Notice}
 	for _, r := range out {
 		if !r.relevant && !req.IncludeWeak {
 			continue
@@ -320,6 +373,58 @@ func Run(ctx context.Context, q pgstore.Q, req Request) (*Response, error) {
 		resp.Results = []Result{}
 	}
 	return resp, nil
+}
+
+func semanticChannel(ctx context.Context, q pgstore.Q, req Request, where string, args []any,
+	vec []float32, modelID, dims int, cands map[string]*candidate) error {
+	semArgs := append([]any{req.Project, embed.Literal(vec)}, args[1:]...)
+	// modelID and dims are integers from the database, formatted so that the
+	// planner can match the partial HNSW index of the model.
+	dist := fmt.Sprintf("(e.embedding::vector(%d) <=> $2::text::vector(%d))", dims, dims)
+	rows, err := q.Query(ctx, fmt.Sprintf(`WITH nn AS (
+		  SELECT c.knowledge_id, c.section, c.text, %s AS dist
+		  FROM embeddings e
+		  JOIN chunks c ON c.embed_hash = e.hash
+		  JOIN knowledge k ON k.id = c.knowledge_id
+		  WHERE e.model_id = %d AND c.project_id = $1 AND k.deleted_at IS NULL `+where+`
+		  ORDER BY dist LIMIT %d
+		)
+		SELECT DISTINCT ON (knowledge_id) knowledge_id, section, text, 1 - dist
+		FROM nn ORDER BY knowledge_id, dist`, dist, modelID, semanticTopK), semArgs...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var sems []*candidate
+	for rows.Next() {
+		var id, section, txt string
+		var sim float64
+		if err := rows.Scan(&id, &section, &txt, &sim); err != nil {
+			return err
+		}
+		c := cands[id]
+		if c == nil {
+			c = &candidate{id: id}
+			cands[id] = c
+		}
+		c.semSim, c.semSection, c.semText = sim, section, txt
+		sems = append(sems, c)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	sort.Slice(sems, func(i, j int) bool { return sems[i].semSim > sems[j].semSim })
+	for i, c := range sems {
+		c.semRank = i + 1
+	}
+	return nil
+}
+
+func nz(xs []string) []string {
+	if xs == nil {
+		return []string{}
+	}
+	return xs
 }
 
 var statusFactor = map[string]float64{"confirmed": 1, "proposed": 0.85, "disputed": 0.7, "obsolete": 0.3, "superseded": 0.2, "rejected": 0.1}

@@ -138,8 +138,10 @@ func (s *Service) commit(ctx context.Context, fn func(tx pgx.Tx, onFail func(fun
 		for i := len(undos) - 1; i >= 0; i-- {
 			undos[i]()
 		}
+		return err
 	}
-	return err
+	s.wakeIndexer()
+	return nil
 }
 
 // Record creates a knowledge (UC-05).
@@ -272,11 +274,48 @@ func hasTicket(refs []string) bool {
 	return false
 }
 
-// possibleDuplicates is the lexical approximation of RG-09 until embeddings land.
+// Weights returns the ranking coefficients of a project (project.yaml → search).
+func Weights(p *domain.Project) search.Weights {
+	w := search.DefaultWeights
+	cfg := p.Search
+	if cfg.Weights.Lexical != nil {
+		w.Lexical = *cfg.Weights.Lexical
+	}
+	if cfg.Weights.Semantic != nil {
+		w.Semantic = *cfg.Weights.Semantic
+	}
+	if cfg.FreshnessHalfLifeDays > 0 {
+		w.FreshnessHalfLife = cfg.FreshnessHalfLifeDays
+	}
+	if cfg.SemanticMinSimilarity > 0 {
+		w.SemanticMinSimilarity = cfg.SemanticMinSimilarity
+	}
+	return w
+}
+
+// DefaultDuplicateThreshold is the RG-09 cosine similarity above which a
+// new knowledge is reported as a possible duplicate.
+const DefaultDuplicateThreshold = 0.92
+
+// possibleDuplicates implements RG-09: header chunks whose embedding is
+// close to title + abstract + overview. Without embeddings (or when the
+// provider fails) it falls back to a strict lexical search.
 func (s *Service) possibleDuplicates(ctx context.Context, c *Caller, k *domain.Knowledge) ([]string, error) {
+	allowRestricted := c.role(k.ProjectID) >= domain.RoleCurator
+	if s.sem != nil {
+		threshold := DefaultDuplicateThreshold
+		if p, _, err := s.Docs.ReadProject(k.ProjectID); err == nil && p.Search.DuplicateThreshold > 0 {
+			threshold = p.Search.DuplicateThreshold
+		}
+		keys, err := s.semanticDuplicates(ctx, k, threshold, allowRestricted)
+		if err == nil {
+			return keys, nil
+		}
+		s.Log.Warn("duplicates: semantic check unavailable, lexical fallback", "error", err)
+	}
 	resp, err := search.Run(ctx, s.DB.Pool, search.Request{
 		Project: k.ProjectID, Query: k.Title + "\n" + k.Abstract, Limit: 3, MaxTokens: 6000,
-		AllowRestricted: c.role(k.ProjectID) >= domain.RoleCurator,
+		AllowRestricted: allowRestricted,
 		Weights:         search.Weights{Lexical: 1, FreshnessHalfLife: 365, MinCoverage: 0.8, MaxRequiredMatches: 8},
 	})
 	if err != nil {
@@ -691,7 +730,17 @@ func (s *Service) Search(ctx context.Context, c *Caller, req search.Request) (*s
 		return nil, err
 	}
 	req.AllowRestricted = c.role(req.Project) >= domain.RoleCurator
-	start := s.Now()
+	if req.Weights == (search.Weights{}) {
+		p, _, err := s.Docs.ReadProject(req.Project)
+		if err != nil {
+			return nil, err
+		}
+		req.Weights = Weights(p)
+	}
+	if s.sem != nil {
+		req.Encode = s.encodeQuery
+	}
+	start := time.Now()
 	resp, err := search.Run(ctx, s.DB.Pool, req)
 	if err != nil {
 		return nil, err
@@ -704,7 +753,7 @@ func (s *Service) Search(ctx context.Context, c *Caller, req search.Request) (*s
 	filters, _ := json.Marshal(req.Filters)
 	_, _ = s.DB.Pool.Exec(ctx, `INSERT INTO search_log (id, project_id, principal_id, query, filters, result_keys, degraded, latency_ms)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, resp.SearchID, req.Project, c.Principal, req.Query, filters, keys, resp.Degraded,
-		int(s.Now().Sub(start).Milliseconds()))
+		int(time.Since(start).Milliseconds()))
 	return resp, nil
 }
 

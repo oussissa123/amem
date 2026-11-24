@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
@@ -24,10 +25,14 @@ type Service struct {
 	DB   *pgstore.DB
 	Docs *docstore.Store
 	Now  func() time.Time
+	Log  *slog.Logger
+
+	sem *semantic // nil: lexical only
 }
 
 func New(db *pgstore.DB, docs *docstore.Store) *Service {
-	return &Service{DB: db, Docs: docs, Now: func() time.Time { return time.Now().UTC().Truncate(time.Second) }}
+	return &Service{DB: db, Docs: docs, Now: func() time.Time { return time.Now().UTC().Truncate(time.Second) },
+		Log: slog.New(slog.DiscardHandler)}
 }
 
 // Caller is the authenticated identity of a request plus its resolution hints.
@@ -291,6 +296,7 @@ func (s *Service) Rebuild(ctx context.Context, c *Caller, id string) (int, error
 	if err != nil {
 		return 0, err
 	}
+	s.wakeIndexer()
 	return n, s.RegenMap(ctx, id)
 }
 

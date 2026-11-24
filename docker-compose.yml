@@ -3,12 +3,17 @@
 #   docker compose up -d          # base + serveur sur http://127.0.0.1:7420
 #   docker compose up -d db       # base seule, pour le binaire local (make db)
 #
+#   docker compose --profile ollama up -d    # + Ollama local pour les embeddings
+#
 # La base est publiée sur 127.0.0.1:5433 pour ne pas gêner un PostgreSQL déjà
 # présent sur 5432 (valeur par défaut de AMEM_DATABASE_URL côté hôte).
-# Phase 3 (recherche sémantique) : remplacer l'image par pgvector/pgvector:pg17.
+# Elle embarque pgvector (docker/postgres/Dockerfile) : la recherche sémantique
+# s'active dès qu'un fournisseur d'embeddings est configuré (AMEM_EMBEDDINGS_*),
+# sinon amem reste en mode lexical.
 services:
   db:
-    image: postgres:17-alpine
+    build: docker/postgres
+    image: amem-postgres:17-pgvector
     container_name: amem-db
     environment:
       POSTGRES_USER: amem
@@ -34,10 +39,29 @@ services:
         condition: service_healthy
     environment:
       AMEM_DATABASE_URL: postgres://amem:${AMEM_DB_PASSWORD:-amem}@db:5432/amem?sslmode=disable
+      # Recherche sémantique : ollama (service ci-dessous, profil « ollama ») ou
+      # openai (tout point de terminaison compatible /v1/embeddings). Vide : lexical.
+      AMEM_EMBEDDINGS_PROVIDER: ${AMEM_EMBEDDINGS_PROVIDER:-}
+      AMEM_EMBEDDINGS_BASE_URL: ${AMEM_EMBEDDINGS_BASE_URL:-http://ollama:11434}
+      AMEM_EMBEDDINGS_MODEL: ${AMEM_EMBEDDINGS_MODEL:-bge-m3}
+      AMEM_EMBEDDINGS_API_KEY_ENV: ${AMEM_EMBEDDINGS_API_KEY_ENV:-}
+      AMEM_EMBEDDINGS_DIMS: ${AMEM_EMBEDDINGS_DIMS:-}
     ports:
       - "${AMEM_HTTP_BIND:-127.0.0.1}:7420:7420"
     volumes:
       - amem-data:/data
+    restart: unless-stopped
+
+  # Fournisseur d'embeddings local (optionnel) :
+  #   docker compose --profile ollama up -d
+  #   docker compose exec ollama ollama pull bge-m3
+  #   AMEM_EMBEDDINGS_PROVIDER=ollama docker compose up -d amem
+  ollama:
+    image: ollama/ollama:0.12.6
+    container_name: amem-ollama
+    profiles: [ollama]
+    volumes:
+      - amem-ollama:/root/.ollama
     restart: unless-stopped
 
 volumes:
@@ -46,3 +70,5 @@ volumes:
     name: amem-db
   amem-data:
     name: amem-data
+  amem-ollama:
+    name: amem-ollama

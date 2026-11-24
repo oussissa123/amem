@@ -944,7 +944,8 @@ Le binaire `amem` s'exécute sur l'hôte ; l'agent lance `amem mcp`. Seule la ba
 
 | Service | Image | Exposition | Volume |
 |---|---|---|---|
-| `db` | `postgres:17-alpine` (phase 3 : `pgvector/pgvector:pg17`), healthcheck `pg_isready` | `127.0.0.1:5433` | `amem-db` |
+| `db` | construite par `docker/postgres/Dockerfile` (`postgres:17-alpine` + pgvector 0.8.1 compilé ; même base, donc un volume existant est réutilisé tel quel), healthcheck `pg_isready` | `127.0.0.1:5433` | `amem-db` |
+| `ollama` (profil `ollama`, optionnel) | `ollama/ollama` | interne | `amem-ollama` |
 | `amem` | construite par le `Dockerfile` (build Go statique, exécution Alpine, utilisateur non-root 10001), commande `amem serve`, healthcheck `/readyz` | `${AMEM_HTTP_BIND:-127.0.0.1}:7420` | `amem-data` → `/data` (`AMEM_ROOT=/data/projects`) |
 
 Variables : `AMEM_DB_PASSWORD` (défaut `amem`), `AMEM_HTTP_BIND`. L'administration se fait dans le conteneur, où la CLI a le rôle admin local : `docker compose exec amem amem init …`, `amem token create`, `amem grant`. Les agents se branchent en mode HTTP (`adapter install multica --mode http`), avec un jeton par agent.
@@ -1037,7 +1038,7 @@ Points à valider avant la phase 3 : modèle d'embedding par défaut (FR + EN + 
 
 ## 21. État d'implémentation (v0.1.0-dev, 20 novembre 2026)
 
-Livré (phases 1 et 2), dans `cmd/amem` et `internal/` :
+Livré (phases 1 à 3), dans `cmd/amem` et `internal/` :
 
 | Domaine | État |
 |---|---|
@@ -1045,7 +1046,10 @@ Livré (phases 1 et 2), dans `cmd/amem` et `internal/` :
 | Stockage canonique : fichiers + historique immuable, écriture atomique, annulation si la transaction échoue | Fait (`internal/docstore`) |
 | PostgreSQL : migrations embarquées, projection, chunks, FTS FR/EN sans accents, trigrammes | Fait (`internal/pgstore`) |
 | Projets : plusieurs dépôts, un dépôt → un projet, références externes, résolution complète §12.1 | Fait (`service/Resolve`, `internal/resolve`) |
-| Recherche : canaux exact + lexical, filtres, seuil de pertinence, repli des remplacements, budget de tokens, `search_log` | Fait ; canal sémantique absent → `degraded: ["semantic"]` |
+| Recherche : canaux exact + lexical, filtres, seuil de pertinence, repli des remplacements, budget de tokens, `search_log` | Fait |
+| Sémantique (phase 3) : `internal/embed` (OpenAI-compatible, Ollama, cache LRU des requêtes), pgvector + HNSW par modèle, indexeur en arrière-plan, canal sémantique fusionné par RRF, poids `project.yaml → search`, mode dégradé `degraded: ["semantic"]`, doublons RG-09 par similarité des en-têtes | Fait |
+| Évaluation : `amem eval run <jeu.yaml> [--compare rapport.json] [-o rapport.json]` (Recall@k, Precision@k, MRR, nDCG@10, exactitude « aucun résultat », latences p50/p95) | Fait (`internal/eval`) |
+| Index : `amem index status` (couverture des embeddings), `amem index rebuild --embeddings`, `amem embed sync` | Fait |
 | Carte L0 déterministe avec budget | Fait (`internal/mapgen`) |
 | Outils MCP (10 outils) en stdio et Streamable HTTP ; API REST `/v1` ; erreurs RFC 9457 ; ETag / If-Match | Fait |
 | Jetons (SHA-256), rôles par projet, identité locale agent/humain | Fait |
@@ -1055,9 +1059,12 @@ Livré (phases 1 et 2), dans `cmd/amem` et `internal/` :
 | Installation | Fait : `Dockerfile` + `docker-compose.yml` (base + serveur HTTP) |
 
 Écarts assumés par rapport à la cible :
-- **Indexation synchrone** : la projection lexicale et la carte sont mises à jour dans la requête d'écriture (pas encore de file `jobs`). La file arrivera avec les embeddings (phase 3).
+- **Indexation** : la projection lexicale et la carte restent synchrones. Les embeddings sont calculés hors du chemin d'écriture par un indexeur en mémoire (goroutine de `amem serve` / `amem mcp`, réveillée à chaque écriture, sinon toutes les 30 s ; repli exponentiel plafonné à 5 min si le fournisseur échoue) qui lit directement les tranches sans vecteur — pas de table `jobs` ; plusieurs processus peuvent tourner ensemble (insertion idempotente). La CLI calcule les embeddings de ce qu'elle vient d'écrire (30 s au plus) ; `amem embed sync` rattrape le reste.
+- **Embeddings adressés par contenu** : au lieu de `chunk_embeddings (chunk_id, model_id)`, la table est `embeddings (model_id, hash, embedding)` et `chunks.embed_hash` = SHA-256 de l'entrée d'embedding (préfixe `"<type> <clé> — <titre> › <section>"` + texte). Une reconstruction ou une nouvelle version ne recalcule que les tranches modifiées ; les vecteurs orphelins sont purgés après indexation. `embeddings` est créée à l'exécution (`CREATE EXTENSION vector`) seulement si un fournisseur est configuré : une base sans pgvector reste utilisable en mode lexical.
+- **Changement de modèle** : pas de commande `embed switch` ; le modèle est celui de la configuration (`AMEM_EMBEDDINGS_*`), chaque (fournisseur, modèle, dimension) a sa ligne dans `embedding_models` et son index HNSW partiel (dimension ≤ 2000, sinon recherche exacte). Après changement, la recherche utilise le nouveau modèle et ne voit que les tranches déjà ré-encodées jusqu'à la fin de `amem embed sync` (ou de l'indexeur).
+- **Requête sémantique** : jointure `embeddings ⋈ chunks ⋈ knowledge` avec les filtres durs, tri par distance cosinus exacte (`LIMIT 100`) ; `hnsw.iterative_scan` n'est pas encore utilisé. L'encodage de la requête démarre en parallèle des canaux exact et lexical, borné par `AMEM_EMBEDDINGS_QUERY_TIMEOUT` (1 s).
 - **Réconciliation** : uniquement par `amem index rebuild` ; le watcher et la réconciliation périodique (§5.3) restent à faire. Une édition externe d'un fichier est détectée à l'écriture suivante (`version_conflict`).
-- **Doublons** (RG-09) : approximation lexicale en attendant les embeddings.
+- **Doublons** (RG-09) : similarité cosinus ≥ `duplicate_threshold` (0,92) entre `titre + abstract + overview` et les tranches header ; approximation lexicale si aucun fournisseur n'est configuré ou s'il échoue.
 - Non livrés : `restricted_grants`, révocation de jeton en CLI, purge, sauvegarde/restauration, audit consultable, rétention, métriques Prometheus, mode SQLite.
 
 Validation réalisée :

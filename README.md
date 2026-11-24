@@ -77,6 +77,56 @@ bin/amem index rebuild -p mra
 
 Identité locale : un humain au terminal est `human:<utilisateur>` (admin local) ; un processus lancé par un agent (Multica, Claude Code, Codex) est reconnu comme `agent:…` avec le rôle `contributor`, et ne peut donc pas confirmer ses propres connaissances. `AMEM_PRINCIPAL` force l'identité.
 
+## Recherche sémantique
+
+Sans configuration, amem cherche en mode lexical (correspondances exactes + plein texte FR/EN) et l'indique par `degraded: ["semantic"]`. Avec un fournisseur d'embeddings, un canal sémantique multilingue s'ajoute et les résultats sont fusionnés (RRF). La base doit avoir pgvector : l'image `db` du `docker-compose.yml` l'inclut (`docker compose up -d --build db` pour mettre à jour un volume existant).
+
+Avec Ollama en local :
+
+```bash
+docker compose --profile ollama up -d ollama
+docker compose exec ollama ollama pull bge-m3
+AMEM_EMBEDDINGS_PROVIDER=ollama docker compose up -d amem
+docker compose exec amem amem embed sync     # encode les connaissances existantes
+docker compose exec amem amem index status -p mra
+```
+
+Binaire sur l'hôte : `AMEM_EMBEDDINGS_PROVIDER=ollama` (Ollama sur `http://localhost:11434`). Tout point de terminaison compatible OpenAI convient aussi :
+
+```bash
+export AMEM_EMBEDDINGS_PROVIDER=openai AMEM_EMBEDDINGS_MODEL=text-embedding-3-small AMEM_EMBEDDINGS_API_KEY_ENV=OPENAI_API_KEY
+```
+
+`amem serve` et `amem mcp` calculent les embeddings en arrière-plan après chaque écriture ; une panne du fournisseur ne bloque ni l'écriture ni la recherche lexicale. Les coefficients se règlent par projet dans `project.yaml` :
+
+```yaml
+search:
+  weights: {lexical: 1.0, semantic: 1.0}
+  semantic_min_similarity: 0.45   # à calibrer par modèle avec amem eval
+  duplicate_threshold: 0.92       # RG-09
+  freshness_half_life_days: 365
+```
+
+Mesurer la qualité sur un jeu de requêtes (et la comparer au rapport précédent) :
+
+```yaml
+# eval.yaml
+project: mra
+k: 3
+cases:
+  - query: "dial tcp 127.0.0.1:6379: connect: connection refused"
+    expected: [INC-2026-001]
+  - query: "lenteur des rapports mensuels"
+    expected: [INC-2026-004]
+  - query: "certificat ingress kubernetes"   # aucun résultat attendu
+    expected: []
+```
+
+```bash
+bin/amem eval run eval.yaml -o eval-bge-m3.json
+bin/amem eval run eval.yaml --compare eval-bge-m3.json
+```
+
 ## Variables
 
 | Variable | Défaut |
@@ -86,11 +136,18 @@ Identité locale : un humain au terminal est `human:<utilisateur>` (admin local)
 | `AMEM_PROJECT` | — (résolution par dépôt Git) |
 | `AMEM_PRINCIPAL` | détecté (`human:<user>` ou `agent:…`) |
 | `AMEM_LISTEN` | `127.0.0.1:7420` (`amem serve`) |
+| `AMEM_EMBEDDINGS_PROVIDER` | — (lexical) ; `ollama` ou `openai` |
+| `AMEM_EMBEDDINGS_BASE_URL` | `http://localhost:11434` (ollama), `https://api.openai.com/v1` (openai) |
+| `AMEM_EMBEDDINGS_MODEL` | `bge-m3` (ollama) ; obligatoire pour openai |
+| `AMEM_EMBEDDINGS_API_KEY_ENV` | — (nom de la variable qui contient la clé) |
+| `AMEM_EMBEDDINGS_DIMS` | — (dimension demandée au fournisseur OpenAI) |
+| `AMEM_EMBEDDINGS_QUERY_PREFIX` / `_DOCUMENT_PREFIX` | — (ex. `query: ` / `passage: ` pour e5) |
+| `AMEM_EMBEDDINGS_QUERY_TIMEOUT` | `1s` (au-delà : mode lexical pour cette recherche) |
 
 ## Tests
 
 ```bash
-make test   # unitaires + intégration (base jetable créée sur le PostgreSQL local), avec -race
+make test   # unitaires + intégration (base jetable créée sur le PostgreSQL local), avec -race ; tests sémantiques ignorés sans pgvector
 ```
 
 La même suite tourne dans GitHub Actions ([`.github/workflows/tests.yml`](.github/workflows/tests.yml)) à chaque push sur `main` et sur chaque pull request, avec la construction de l'image Docker.

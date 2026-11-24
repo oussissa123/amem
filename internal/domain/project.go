@@ -9,17 +9,18 @@ const SchemaProject = "amem/project/v1"
 
 // Project is the unit of memory (spec 00 §4.5), stored as project.yaml.
 type Project struct {
-	Schema       string        `yaml:"schema" json:"-"`
-	ID           string        `yaml:"id" json:"id"`
-	Name         string        `yaml:"name" json:"name"`
-	Description  string        `yaml:"description,omitempty" json:"description,omitempty"`
-	Repositories []Repository  `yaml:"repositories,omitempty" json:"repositories,omitempty"`
-	ExternalRefs []ExternalRef `yaml:"external_refs,omitempty" json:"external_refs,omitempty"`
-	Languages    []string      `yaml:"languages,omitempty" json:"-"`
+	Schema       string              `yaml:"schema" json:"-"`
+	ID           string              `yaml:"id" json:"id"`
+	Name         string              `yaml:"name" json:"name"`
+	Description  string              `yaml:"description,omitempty" json:"description,omitempty"`
+	Repositories []Repository        `yaml:"repositories,omitempty" json:"repositories,omitempty"`
+	ExternalRefs []ExternalRef       `yaml:"external_refs,omitempty" json:"external_refs,omitempty"`
+	Languages    []string            `yaml:"languages,omitempty" json:"-"`
 	Topics       map[string]TopicDef `yaml:"topics,omitempty" json:"-"`
-	Governance   Governance    `yaml:"governance,omitempty" json:"-"`
-	Privacy      Privacy       `yaml:"privacy,omitempty" json:"-"`
-	Retention    Retention     `yaml:"retention,omitempty" json:"-"`
+	Search       SearchConfig        `yaml:"search,omitempty" json:"-"`
+	Governance   Governance          `yaml:"governance,omitempty" json:"-"`
+	Privacy      Privacy             `yaml:"privacy,omitempty" json:"-"`
+	Retention    Retention           `yaml:"retention,omitempty" json:"-"`
 }
 
 type Repository struct {
@@ -44,6 +45,21 @@ func (e ExternalRef) Ref() string {
 
 type TopicDef struct {
 	Aliases []string `yaml:"aliases,omitempty"`
+}
+
+// SearchConfig holds the ranking coefficients of a project (spec 02 §7.2);
+// zero values mean the defaults.
+type SearchConfig struct {
+	Weights               SearchWeights `yaml:"weights,omitempty"`
+	FreshnessHalfLifeDays float64       `yaml:"freshness_half_life_days,omitempty"`
+	DuplicateThreshold    float64       `yaml:"duplicate_threshold,omitempty"`
+	SemanticMinSimilarity float64       `yaml:"semantic_min_similarity,omitempty"`
+}
+
+// SearchWeights are pointers so that a channel can be switched off with 0.
+type SearchWeights struct {
+	Lexical  *float64 `yaml:"lexical,omitempty"`
+	Semantic *float64 `yaml:"semantic,omitempty"`
 }
 
 type Governance struct {

@@ -26,6 +26,8 @@ import (
 	"github.com/oussissa/amem/internal/config"
 	"github.com/oussissa/amem/internal/docstore"
 	"github.com/oussissa/amem/internal/domain"
+	"github.com/oussissa/amem/internal/embed"
+	"github.com/oussissa/amem/internal/eval"
 	"github.com/oussissa/amem/internal/httpapi"
 	"github.com/oussissa/amem/internal/mcpserver"
 	"github.com/oussissa/amem/internal/pgstore"
@@ -56,7 +58,7 @@ func main() {
 	root.PersistentFlags().BoolVar(&a.asJSON, "json", false, "JSON output")
 	root.AddCommand(a.initCmd(), a.projectCmd(), a.resolveCmd(), a.mcpCmd(), a.serveCmd(), a.overviewCmd(),
 		a.searchCmd(), a.readCmd(), a.recordCmd(), a.updateCmd(), a.statusCmd(), a.relatedCmd(), a.ingestCmd(),
-		a.feedbackCmd(), a.indexCmd(), a.tokenCmd(), a.grantCmd(), a.adapterCmd())
+		a.feedbackCmd(), a.indexCmd(), a.embedCmd(), a.evalCmd(), a.tokenCmd(), a.grantCmd(), a.adapterCmd())
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -92,10 +94,34 @@ func (a *app) open(ctx context.Context) error {
 	}
 	a.db = db
 	a.svc = service.New(db, docstore.New(a.cfg.Root))
+	a.svc.Log = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	emb, err := embed.New(a.cfg.Embeddings)
+	if err != nil {
+		return err
+	}
+	if err := a.svc.EnableSemantic(ctx, emb, a.cfg.QueryTimeout); err != nil {
+		a.svc.Log.Warn("semantic search disabled, lexical mode", "error", err)
+	}
 	return nil
 }
 
-func (a *app) caller(forceAgent bool) *service.Caller { return config.LocalCaller(a.project, forceAgent) }
+// embedNow computes the embeddings of what a CLI command just wrote, when no
+// server is running to do it. A failure is only reported: the indexer of
+// `amem serve` / `amem mcp` or `amem embed sync` catches up later.
+func (a *app) embedNow(ctx context.Context) {
+	if !a.svc.SemanticEnabled() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if _, err := a.svc.EmbedPending(ctx); err != nil {
+		a.svc.Log.Warn("embeddings not computed yet", "error", err)
+	}
+}
+
+func (a *app) caller(forceAgent bool) *service.Caller {
+	return config.LocalCaller(a.project, forceAgent)
+}
 
 // target resolves the project for CLI commands.
 func (a *app) target(ctx context.Context, c *service.Caller) (string, error) {
@@ -269,6 +295,7 @@ func (a *app) mcpCmd() *cobra.Command {
 			if err := a.open(cmd.Context()); err != nil {
 				return err
 			}
+			go a.svc.RunIndexer(cmd.Context())
 			srv := mcpserver.New(a.svc, a.caller(true), version)
 			return srv.Run(cmd.Context(), &mcp.StdioTransport{})
 		},
@@ -283,6 +310,8 @@ func (a *app) serveCmd() *cobra.Command {
 				return err
 			}
 			log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+			a.svc.Log = log
+			go a.svc.RunIndexer(cmd.Context())
 			srv := &http.Server{Addr: a.cfg.Listen, Handler: httpapi.New(a.svc, version, log), ReadHeaderTimeout: 10 * time.Second}
 			go func() {
 				<-cmd.Context().Done()
@@ -421,6 +450,7 @@ func (a *app) recordCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			a.embedNow(ctx)
 			text := fmt.Sprintf("%s recorded (version %d, %s)", r.Key, r.Version, r.Status)
 			if len(r.PossibleDuplicates) > 0 {
 				text += "\npossible duplicates: " + strings.Join(r.PossibleDuplicates, ", ")
@@ -473,6 +503,7 @@ func (a *app) updateCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			a.embedNow(ctx)
 			return a.print(r, fmt.Sprintf("%s → version %d (%s) %s", r.Key, r.Version, r.Status, strings.Join(r.Warnings, " ")))
 		}),
 	}
@@ -567,7 +598,8 @@ func (a *app) feedbackCmd() *cobra.Command {
 
 func (a *app) indexCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "index", Short: "Manage derived indexes"}
-	cmd.AddCommand(&cobra.Command{
+	var withEmbeddings bool
+	rebuild := &cobra.Command{
 		Use: "rebuild", Short: "Rebuild the index of a project from its files (UC-13)",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := a.open(cmd.Context()); err != nil {
@@ -581,9 +613,135 @@ func (a *app) indexCmd() *cobra.Command {
 				return err
 			}
 			fmt.Printf("%s: %d documents indexed\n", a.project, n)
+			if !withEmbeddings {
+				return nil
+			}
+			// Unchanged chunks keep their vectors (content-addressed).
+			m, err := a.svc.EmbedPending(cmd.Context())
+			if err != nil {
+				return err
+			}
+			fmt.Printf("%d chunks embedded\n", m)
+			return nil
+		},
+	}
+	rebuild.Flags().BoolVar(&withEmbeddings, "embeddings", false, "also compute the missing embeddings before returning")
+	cmd.AddCommand(rebuild, &cobra.Command{
+		Use: "status", Short: "Show documents, chunks and embedding coverage of a project",
+		RunE: a.run(func(ctx context.Context, c *service.Caller, p string, _ []string) error {
+			st, err := a.svc.IndexStatus(ctx, c, p)
+			if err != nil {
+				return err
+			}
+			text := fmt.Sprintf("%s: %d documents, %d chunks\n", st.Project, st.Documents, st.Chunks)
+			if st.Semantic {
+				dims := "dimension not known yet"
+				if st.Dims > 0 {
+					dims = fmt.Sprintf("%d dims", st.Dims)
+				}
+				text += fmt.Sprintf("semantic: %s (%s), %d/%d chunks embedded, %d pending",
+					st.Model, dims, st.EmbeddedChunks, st.Chunks, st.PendingChunks)
+			} else {
+				text += "semantic: disabled (" + st.SemanticDisabled + ")"
+			}
+			return a.print(st, text)
+		}),
+	})
+	return cmd
+}
+
+func (a *app) embedCmd() *cobra.Command {
+	cmd := &cobra.Command{Use: "embed", Short: "Manage embeddings (semantic search)"}
+	cmd.AddCommand(&cobra.Command{
+		Use:   "sync",
+		Short: "Compute the missing embeddings of every project now, with the configured model",
+		Long: "Computes the vectors missing for the model set by AMEM_EMBEDDINGS_*. Changing model: set the new\n" +
+			"model and run `amem embed sync`; vectors of unchanged chunks are reused per model.",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := a.open(cmd.Context()); err != nil {
+				return err
+			}
+			n, err := a.svc.EmbedPending(cmd.Context())
+			if err != nil {
+				return err
+			}
+			pruned, err := pgstore.PruneEmbeddings(cmd.Context(), a.db.Pool)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("%d chunks embedded, %d unused vectors pruned\n", n, pruned)
 			return nil
 		},
 	})
+	return cmd
+}
+
+func (a *app) evalCmd() *cobra.Command {
+	cmd := &cobra.Command{Use: "eval", Short: "Evaluate search quality (UC-16)"}
+	var compare, out string
+	run := &cobra.Command{
+		Use: "run <set.yaml>", Short: "Run an evaluation set: Recall@k, Precision@k, MRR, nDCG@10, latencies",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			set, err := eval.Load(args[0])
+			if err != nil {
+				return err
+			}
+			if err := a.open(ctx); err != nil {
+				return err
+			}
+			if set.Project != "" && a.project == "" {
+				a.project = set.Project
+			}
+			c := a.caller(false)
+			p, err := a.target(ctx, c)
+			if err != nil {
+				return err
+			}
+			if a.svc.SemanticEnabled() {
+				// Measure the steady state: embeddings up to date.
+				if _, err := a.svc.EmbedPending(ctx); err != nil {
+					a.svc.Log.Warn("embeddings not up to date", "error", err)
+				}
+			}
+			rep, err := eval.Run(ctx, set, func(ctx context.Context, cs eval.Case) (*search.Response, error) {
+				return a.svc.Search(ctx, c, search.Request{Project: p, Query: cs.Query, Context: &search.Context{Error: cs.Error},
+					Filters: cs.Filters, Limit: 10, MaxTokens: 6000})
+			})
+			if err != nil {
+				return err
+			}
+			rep.Set, rep.Project = args[0], p
+			if pr, _, err := a.svc.Docs.ReadProject(p); err == nil {
+				rep.Weights = service.Weights(pr)
+			}
+			if st, err := a.svc.IndexStatus(ctx, c, p); err == nil && st.Semantic {
+				rep.Model = fmt.Sprintf("%s (%d dims)", st.Model, st.Dims)
+			}
+			var prev *eval.Report
+			if compare != "" {
+				b, err := os.ReadFile(compare)
+				if err != nil {
+					return err
+				}
+				prev = &eval.Report{}
+				if err := json.Unmarshal(b, prev); err != nil {
+					return fmt.Errorf("%s: %w", compare, err)
+				}
+			}
+			if out != "" {
+				b, _ := json.MarshalIndent(rep, "", "  ")
+				if err := os.WriteFile(out, append(b, '\n'), 0o640); err != nil {
+					return err
+				}
+			}
+			return a.print(rep, eval.Summary(rep, prev))
+		},
+	}
+	run.Flags().StringVar(&compare, "compare", "", "previous JSON report to compare with")
+	run.Flags().StringVarP(&out, "out", "o", "", "write the JSON report to this file")
+	cmd.AddCommand(run)
 	return cmd
 }
 

@@ -6,9 +6,12 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/oussissa/amem/internal/domain"
+	"github.com/oussissa/amem/internal/embed"
 	"github.com/oussissa/amem/internal/service"
 )
 
@@ -19,6 +22,10 @@ type Config struct {
 	Root        string
 	Listen      string
 	Project     string
+	Embeddings  embed.Config
+	// QueryTimeout bounds the encoding of a search query; past it the
+	// search answers in lexical mode (degraded ["semantic"]).
+	QueryTimeout time.Duration
 }
 
 func Load() Config {
@@ -27,6 +34,21 @@ func Load() Config {
 		Root:        env("AMEM_ROOT", ""),
 		Listen:      env("AMEM_LISTEN", "127.0.0.1:7420"),
 		Project:     os.Getenv("AMEM_PROJECT"),
+		Embeddings: embed.Config{
+			Provider:       os.Getenv("AMEM_EMBEDDINGS_PROVIDER"),
+			BaseURL:        os.Getenv("AMEM_EMBEDDINGS_BASE_URL"),
+			Model:          os.Getenv("AMEM_EMBEDDINGS_MODEL"),
+			APIKeyEnv:      os.Getenv("AMEM_EMBEDDINGS_API_KEY_ENV"),
+			QueryPrefix:    os.Getenv("AMEM_EMBEDDINGS_QUERY_PREFIX"),
+			DocumentPrefix: os.Getenv("AMEM_EMBEDDINGS_DOCUMENT_PREFIX"),
+		},
+		QueryTimeout: time.Second,
+	}
+	if n, err := strconv.Atoi(os.Getenv("AMEM_EMBEDDINGS_DIMS")); err == nil {
+		c.Embeddings.Dims = n
+	}
+	if d, err := time.ParseDuration(os.Getenv("AMEM_EMBEDDINGS_QUERY_TIMEOUT")); err == nil {
+		c.QueryTimeout = d
 	}
 	if c.Root == "" {
 		base := os.Getenv("XDG_DATA_HOME")

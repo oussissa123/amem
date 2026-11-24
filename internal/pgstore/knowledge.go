@@ -24,9 +24,9 @@ type Q interface {
 // Row is the projection of a knowledge needed by the write path.
 type Row struct {
 	ID, Key, Type, Status, CreatedBy, FilePath, ContentHash, Classification string
-	SupersedesKey, SupersededByKey                                           string
-	Version                                                                  int
-	Deleted                                                                  bool
+	SupersedesKey, SupersededByKey                                          string
+	Version                                                                 int
+	Deleted                                                                 bool
 }
 
 func GetRow(ctx context.Context, q Q, project, key string, forUpdate bool) (*Row, error) {
@@ -57,14 +57,15 @@ func NextKey(ctx context.Context, tx pgx.Tx, project string, t domain.Type, year
 	return domain.FormatKey(t, year, n), nil
 }
 
-const insertChunkSQL = `INSERT INTO chunks (project_id, knowledge_id, version, ordinal, section, text, token_count, text_hash, tsv)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,
+const insertChunkSQL = `INSERT INTO chunks (project_id, knowledge_id, version, ordinal, section, text, token_count, text_hash, embed_hash, tsv)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$12,
   setweight(to_tsvector('amem_simple',$9),'A') || setweight(to_tsvector('amem_fr',$9),'A') || setweight(to_tsvector('amem_en',$9),'A') ||
   setweight(to_tsvector('amem_simple',$10),'B') || setweight(to_tsvector('amem_fr',$10),'B') || setweight(to_tsvector('amem_en',$10),'B') ||
   setweight(to_tsvector('amem_fr',$11),'C') || setweight(to_tsvector('amem_en',$11),'C') || setweight(to_tsvector('amem_simple',$11),'D'))`
 
 // Project writes the derived projection of a document: knowledge row,
-// relations and lexical chunks (spec 02 §6).
+// relations and chunks (spec 02 §6). Embeddings are computed afterwards by
+// the indexer, which reuses vectors whose input is unchanged.
 func Project(ctx context.Context, tx pgx.Tx, k *domain.Knowledge, rel, hash string) error {
 	var deletedAt *time.Time = k.DeletedAt
 	kwNorm := strings.ToLower(strings.Join(k.Keywords, " ‖ "))
@@ -104,7 +105,8 @@ func Project(ctx context.Context, tx pgx.Tx, k *domain.Knowledge, rel, hash stri
 			body = c.Text
 		}
 		if _, err := tx.Exec(ctx, insertChunkSQL, k.ProjectID, k.ID, k.Version, c.Ordinal, c.Section, c.Text,
-			chunk.Tokens(c.Text), docstore.Hash([]byte(c.Text)), c.A, c.B, body); err != nil {
+			chunk.Tokens(c.Text), docstore.Hash([]byte(c.Text)), c.A, c.B, body,
+			InputHash(chunk.EmbedInput(string(k.Type), k.Key, k.Title, c.Section, c.Text))); err != nil {
 			return err
 		}
 	}
